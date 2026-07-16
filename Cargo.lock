@@ -648,6 +648,7 @@ dependencies = [
  "async-button",
  "critical-section",
  "defmt 1.1.1",
+ "display-driver",
  "display-driver-co5300",
  "embassy-executor",
  "embassy-time 0.5.1",
