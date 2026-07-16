@@ -9,8 +9,11 @@
 
 use defmt::info;
 use embassy_executor::Spawner;
-use embassy_futures::select::{Either, select};
+use embassy_futures::select::{Either3, select3};
+use embassy_time::{Duration, Timer};
 use energy_meter::display::{self, DisplayPeripherals};
+use energy_meter::i2c::{self, I2cPeripherals};
+use energy_meter::power::{Axp2101, PowerKeyEvent};
 use energy_meter::touch::{Cst9217, TouchPeripherals};
 use energy_meter::ui;
 use esp_backtrace as _;
@@ -63,15 +66,28 @@ async fn main(spawner: Spawner) -> ! {
     })
     .await;
 
-    // Bring up the CST9217 capacitive touch controller (I2C).
-    let mut touch = Cst9217::init(TouchPeripherals {
+    // Shared I2C bus for the touch controller and the power-management IC.
+    let i2c_bus = i2c::init(I2cPeripherals {
         i2c: peripherals.I2C0,
         sda: peripherals.GPIO15,
         scl: peripherals.GPIO14,
-        int: peripherals.GPIO11,
-        reset: peripherals.GPIO40,
-    })
+    });
+
+    // Bring up the CST9217 capacitive touch controller (I2C).
+    let mut touch = Cst9217::init(
+        i2c::device(i2c_bus),
+        TouchPeripherals {
+            int: peripherals.GPIO11,
+            reset: peripherals.GPIO40,
+        },
+    )
     .await;
+
+    // Bring up the AXP2101 PMU; the PWR side button is wired to its power key.
+    let mut pmu = Axp2101::init(i2c::device(i2c_bus)).await;
+
+    // Tracks whether the panel is currently on, for the PWR toggle.
+    let mut screen_on = true;
 
     // First screen.
     let mut index = 0usize;
@@ -84,26 +100,57 @@ async fn main(spawner: Spawner) -> ! {
     let _ = spawner;
 
     loop {
-        // Reacciona a lo que ocurra primero: el BOOT button o un toque.
-        match select(boot_button.wait_for_falling_edge(), touch.wait_for_touch()).await {
-            Either::First(()) => {
+        // Reacciona a lo que ocurra primero: el BOOT button, un toque, o el
+        // PWR button (que llega por el PMU, sondeado periódicamente).
+        match select3(
+            boot_button.wait_for_falling_edge(),
+            touch.wait_for_touch(),
+            Timer::after(Duration::from_millis(100)),
+        )
+        .await
+        {
+            Either3::First(()) => {
                 info!("BOOT button pressed");
 
                 // Cada pulsación muestra la siguiente lectura simulada.
                 index = (index + 1) % READINGS.len();
-                ui::draw(&mut framebuffer, READINGS[index]);
-                display::flush(&mut display, &framebuffer).await.ok();
+                if screen_on {
+                    ui::draw(&mut framebuffer, READINGS[index]);
+                    display::flush(&mut display, &framebuffer).await.ok();
+                }
 
                 // Espera hasta que se suelte el BOOT button
                 boot_button.wait_for_rising_edge().await;
                 info!("BOOT button released");
             }
-            Either::Second(()) => {
-                if let Some(point) = touch.read().await {
-                    info!("Touch at ({}, {})", point.x, point.y);
-                    ui::draw(&mut framebuffer, READINGS[index]);
-                    ui::draw_touch_marker(&mut framebuffer, point);
-                    display::flush(&mut display, &framebuffer).await.ok();
+            Either3::Second(()) => {
+                if screen_on {
+                    if let Some(point) = touch.read().await {
+                        info!("Touch at ({}, {})", point.x, point.y);
+                        ui::draw(&mut framebuffer, READINGS[index]);
+                        ui::draw_touch_marker(&mut framebuffer, point);
+                        display::flush(&mut display, &framebuffer).await.ok();
+                    }
+                }
+            }
+            Either3::Third(()) => {
+                // Poll the PMU for a PWR-button event.
+                if let Some(pmu) = pmu.as_mut()
+                    && let Some(event) = pmu.poll_key_event().await
+                {
+                    info!("PWR button event: {:?}", event);
+                    if event == PowerKeyEvent::ShortPress {
+                        screen_on = !screen_on;
+                        if screen_on {
+                            info!("Screen on");
+                            display.set_brightness(0xFF).await.ok();
+                            ui::draw(&mut framebuffer, READINGS[index]);
+                            display::flush(&mut display, &framebuffer).await.ok();
+                        } else {
+                            info!("Screen off");
+                            display.set_brightness(0x00).await.ok();
+                        }
+                    }
                 }
             }
         }

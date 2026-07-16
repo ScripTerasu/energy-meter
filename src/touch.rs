@@ -5,18 +5,17 @@
 //! acknowledged by writing the same register followed by an ACK byte.
 //!
 //! Pin mapping comes from the Waveshare `pin_config.h`:
-//! - SDA = GPIO15, SCL = GPIO14
+//! - SDA = GPIO15, SCL = GPIO14 (shared bus, see [`crate::i2c`])
 //! - TP_INT (IRQ, active low) = GPIO11
 //! - TP_RESET = GPIO40 (independent from the LCD reset on GPIO39)
 
 use embassy_time::{Duration, Timer};
-use esp_hal::Async;
+use embedded_hal_async::i2c::I2c;
 use esp_hal::gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull};
-use esp_hal::i2c::master::{Config, I2c};
-use esp_hal::peripherals::{GPIO11, GPIO14, GPIO15, GPIO40, I2C0};
-use esp_hal::time::Rate;
+use esp_hal::peripherals::{GPIO11, GPIO40};
 
-use crate::board::{LCD_HEIGHT, LCD_WIDTH, TOUCH_I2C_ADDR, TOUCH_I2C_FREQ_KHZ};
+use crate::board::{LCD_HEIGHT, LCD_WIDTH, TOUCH_I2C_ADDR};
+use crate::i2c::SharedI2c;
 
 /// Read-report register of the CST9217 (big-endian).
 const READ_COMMAND: [u8; 2] = [0xD0, 0x00];
@@ -38,36 +37,23 @@ pub struct TouchPoint {
 
 /// Peripherals owned by the CST9217 touch controller.
 ///
-/// Grouping them mirrors [`crate::display::DisplayPeripherals`] and documents
-/// exactly which pins the touch driver takes.
+/// The I2C bus is shared (see [`crate::i2c`]); only the reset and interrupt
+/// pins are exclusive to the touch controller.
 pub struct TouchPeripherals {
-    pub i2c: I2C0<'static>,
-    pub sda: GPIO15<'static>,
-    pub scl: GPIO14<'static>,
     pub int: GPIO11<'static>,
     pub reset: GPIO40<'static>,
 }
 
 /// Driver for the CST9217 capacitive touch controller.
 pub struct Cst9217 {
-    i2c: I2c<'static, Async>,
+    i2c: SharedI2c,
     int: Input<'static>,
     reset: Output<'static>,
 }
 
 impl Cst9217 {
-    /// Initializes the I2C bus, resets the controller and returns a ready
-    /// driver.
-    pub async fn init(p: TouchPeripherals) -> Self {
-        let i2c = I2c::new(
-            p.i2c,
-            Config::default().with_frequency(Rate::from_khz(TOUCH_I2C_FREQ_KHZ)),
-        )
-        .unwrap()
-        .with_sda(p.sda)
-        .with_scl(p.scl)
-        .into_async();
-
+    /// Resets the controller and returns a ready driver.
+    pub async fn init(i2c: SharedI2c, p: TouchPeripherals) -> Self {
         let int = Input::new(p.int, InputConfig::default().with_pull(Pull::Up));
         let reset = Output::new(p.reset, Level::High, OutputConfig::default());
 
@@ -102,13 +88,13 @@ impl Cst9217 {
     pub async fn read(&mut self) -> Option<TouchPoint> {
         let mut report = [0u8; REPORT_LEN];
         self.i2c
-            .write_read_async(TOUCH_I2C_ADDR, &READ_COMMAND, &mut report)
+            .write_read(TOUCH_I2C_ADDR, &READ_COMMAND, &mut report)
             .await
             .ok()?;
 
         // Acknowledge the report so the controller can prepare the next one.
         let ack = [READ_COMMAND[0], READ_COMMAND[1], ACK];
-        self.i2c.write_async(TOUCH_I2C_ADDR, &ack).await.ok()?;
+        self.i2c.write(TOUCH_I2C_ADDR, &ack).await.ok()?;
 
         // Device ACK: byte 6 must echo the ACK value for a valid frame.
         if report[6] != ACK {
