@@ -12,6 +12,7 @@ use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use esp_backtrace as _;
 use esp_hal::clock::CpuClock;
+use esp_hal::gpio::{Input, InputConfig, Pull};
 use esp_hal::timer::timg::TimerGroup;
 use esp_println as _;
 
@@ -36,14 +37,24 @@ async fn main(spawner: Spawner) -> ! {
         esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
 
+    let mut boot_button = Input::new(
+        peripherals.GPIO0,
+        InputConfig::default().with_pull(Pull::Up),
+    );
+
     info!("Embassy initialized!");
 
     // TODO: Spawn some tasks
     let _ = spawner;
 
     loop {
-        info!("Hello world!");
-        Timer::after(Duration::from_secs(1)).await;
+        // Espera hasta que el BOOT button se presione
+        boot_button.wait_for_falling_edge().await;
+        info!("BOOT button pressed");
+
+        // Espera hasta que se suelte el BOOT button
+        boot_button.wait_for_rising_edge().await;
+        info!("BOOT button released");
     }
 
     // for inspiration have a look at the examples at https://github.com/esp-rs/esp-hal/tree/esp-hal-v1.1.0/examples
