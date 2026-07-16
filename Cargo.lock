@@ -651,6 +651,7 @@ dependencies = [
  "display-driver",
  "display-driver-co5300",
  "embassy-executor",
+ "embassy-futures",
  "embassy-time 0.5.1",
  "embedded-graphics",
  "embedded-hal 1.0.0",
