@@ -11,6 +11,7 @@ use defmt::info;
 use embassy_executor::Spawner;
 use embassy_futures::select::{Either3, select3};
 use embassy_time::{Duration, Timer};
+use energy_meter::board::LCD_WIDTH;
 use energy_meter::display::{self, DisplayPeripherals};
 use energy_meter::i2c::{self, I2cPeripherals};
 use energy_meter::power::{Axp2101, PowerKeyEvent};
@@ -28,6 +29,7 @@ esp_bootloader_esp_idf::esp_app_desc!();
 
 /// Simulated meter readings, cycled through with the BOOT button.
 const READINGS: [u32; 5] = [0, 125, 480, 1234, 3300];
+const TOUCH_DELTA: u32 = 1;
 
 const BRIGHTNESS_LEVELS: [u8; 5] = [0x00, 0x33, 0x66, 0x99, 0xFF];
 
@@ -103,7 +105,8 @@ async fn main(spawner: Spawner) -> ! {
 
     // First screen.
     let mut index = 0usize;
-    ui::draw(&mut framebuffer, READINGS[index]);
+    let mut reading_value = READINGS[index];
+    ui::draw(&mut framebuffer, reading_value);
     display::flush(&mut display, &framebuffer).await.ok();
 
     info!("Embassy initialized!");
@@ -126,8 +129,9 @@ async fn main(spawner: Spawner) -> ! {
 
                 // Cada pulsación muestra la siguiente lectura simulada.
                 index = (index + 1) % READINGS.len();
+                reading_value = READINGS[index];
                 if screen_on {
-                    ui::draw(&mut framebuffer, READINGS[index]);
+                    ui::draw(&mut framebuffer, reading_value);
                     display::flush(&mut display, &framebuffer).await.ok();
                 }
 
@@ -139,7 +143,17 @@ async fn main(spawner: Spawner) -> ! {
                 if screen_on {
                     if let Some(point) = touch.read().await {
                         info!("Touch at ({}, {})", point.x, point.y);
-                        ui::draw(&mut framebuffer, READINGS[index]);
+                        let mid_x = i32::from(LCD_WIDTH) / 2;
+                        if i32::from(point.x) < mid_x {
+                            let previous = reading_value;
+                            reading_value = reading_value.saturating_sub(TOUCH_DELTA);
+                            info!("Left touch: {} -> {}", previous, reading_value);
+                        } else {
+                            let previous = reading_value;
+                            reading_value = reading_value.saturating_add(TOUCH_DELTA);
+                            info!("Right touch: {} -> {}", previous, reading_value);
+                        }
+                        ui::draw(&mut framebuffer, reading_value);
                         ui::draw_touch_marker(&mut framebuffer, point);
                         display::flush(&mut display, &framebuffer).await.ok();
                     }

@@ -25,6 +25,21 @@ impl FrameBuf {
     pub fn as_bytes(&self) -> &[u8] {
         self.buf
     }
+
+    /// Sets an individual pixel without going through the `DrawTarget` API.
+    pub fn set_pixel(&mut self, point: Point, color: Rgb565) {
+        if point.x < 0
+            || point.y < 0
+            || point.x >= i32::from(LCD_WIDTH)
+            || point.y >= i32::from(LCD_HEIGHT)
+        {
+            return;
+        }
+        let idx = (point.y as usize * LCD_WIDTH as usize + point.x as usize) * 2;
+        let raw = color.into_storage().to_be_bytes();
+        self.buf[idx] = raw[0];
+        self.buf[idx + 1] = raw[1];
+    }
 }
 
 impl OriginDimensions for FrameBuf {

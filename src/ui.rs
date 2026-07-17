@@ -1,16 +1,29 @@
 //! On-screen interface rendered with `embedded-graphics`.
 
+use core::cell::UnsafeCell;
 use embedded_graphics::{
-    mono_font::{MonoTextStyle, ascii::FONT_10X20},
+    mono_font::{MonoFont, MonoTextStyle, ascii::FONT_10X20},
     pixelcolor::Rgb565,
     prelude::*,
     primitives::{Circle, PrimitiveStyleBuilder, Rectangle},
     text::{Alignment, Text},
 };
+use embedded_graphics_framebuf::FrameBuf as EgFrameBuf;
 
 use crate::board::{LCD_HEIGHT, LCD_WIDTH};
 use crate::display::FrameBuf;
 use crate::touch::TouchPoint;
+
+const TEXT_SCALE: i32 = 3;
+const TEXT_BUF_WIDTH: usize = 150;
+const TEXT_BUF_HEIGHT: usize = 120;
+const TEXT_BUF_SIZE: usize = TEXT_BUF_WIDTH * TEXT_BUF_HEIGHT;
+
+struct TextBuffer(UnsafeCell<[Rgb565; TEXT_BUF_SIZE]>);
+
+unsafe impl Sync for TextBuffer {}
+
+static VALUE_TEXT_BUFFER: TextBuffer = TextBuffer(UnsafeCell::new([Rgb565::BLACK; TEXT_BUF_SIZE]));
 
 /// Draws the energy-meter screen for the given reading (in watts).
 pub fn draw(fb: &mut FrameBuf, watts: u32) {
@@ -52,10 +65,7 @@ pub fn draw(fb: &mut FrameBuf, watts: u32) {
     // Reading, formatted without alloc.
     let mut buf = [0u8; 16];
     let text = format_watts(&mut buf, watts);
-    let value_style = MonoTextStyle::new(&FONT_10X20, white);
-    Text::with_alignment(text, center, value_style, Alignment::Center)
-        .draw(fb)
-        .ok();
+    draw_large_text(fb, text, &FONT_10X20, white, center, bg);
 }
 
 /// Draws a filled marker at the last touched coordinate.
@@ -65,6 +75,40 @@ pub fn draw_touch_marker(fb: &mut FrameBuf, point: TouchPoint) {
         .into_styled(PrimitiveStyleBuilder::new().fill_color(marker).build())
         .draw(fb)
         .ok();
+}
+
+fn draw_large_text(
+    fb: &mut FrameBuf,
+    text: &str,
+    font: &MonoFont,
+    color: Rgb565,
+    center: Point,
+    background: Rgb565,
+) {
+    let style = MonoTextStyle::new(font, color);
+    let text_center = Point::new(TEXT_BUF_WIDTH as i32 / 2, TEXT_BUF_HEIGHT as i32 / 2);
+    let scaled_width = TEXT_BUF_WIDTH as i32 * TEXT_SCALE;
+    let scaled_height = TEXT_BUF_HEIGHT as i32 * TEXT_SCALE;
+    let origin = Point::new(center.x - scaled_width / 2, center.y - scaled_height / 2);
+
+    unsafe {
+        let buffer = &mut *VALUE_TEXT_BUFFER.0.get();
+        let mut text_fb = EgFrameBuf::new(buffer, TEXT_BUF_WIDTH, TEXT_BUF_HEIGHT);
+        text_fb.clear(background).ok();
+        Text::with_alignment(text, text_center, style, Alignment::Center)
+            .draw(&mut text_fb)
+            .ok();
+
+        for Pixel(coord, pixel_color) in text_fb.into_iter() {
+            let base_x = origin.x + coord.x * TEXT_SCALE;
+            let base_y = origin.y + coord.y * TEXT_SCALE;
+            for dy in 0..TEXT_SCALE {
+                for dx in 0..TEXT_SCALE {
+                    fb.set_pixel(Point::new(base_x + dx, base_y + dy), pixel_color);
+                }
+            }
+        }
+    }
 }
 
 /// Formats `"<watts> W"` into `buf` without heap allocation.
