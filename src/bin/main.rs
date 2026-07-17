@@ -29,6 +29,12 @@ esp_bootloader_esp_idf::esp_app_desc!();
 /// Simulated meter readings, cycled through with the BOOT button.
 const READINGS: [u32; 5] = [0, 125, 480, 1234, 3300];
 
+const BRIGHTNESS_LEVELS: [u8; 5] = [0x00, 0x33, 0x66, 0x99, 0xFF];
+
+const fn brightness_percent(value: u8) -> u8 {
+    (((value as u32) * 100 + 127) / 255) as u8
+}
+
 #[allow(
     clippy::large_stack_frames,
     reason = "it's not unusual to allocate larger buffers etc. in main"
@@ -86,8 +92,14 @@ async fn main(spawner: Spawner) -> ! {
     // Bring up the AXP2101 PMU; the PWR side button is wired to its power key.
     let mut pmu = Axp2101::init(i2c::device(i2c_bus)).await;
 
-    // Tracks whether the panel is currently on, for the PWR toggle.
-    let mut screen_on = true;
+    let mut brightness_index = BRIGHTNESS_LEVELS.len() - 1;
+    // Tracks whether the panel is currently on (non-zero brightness).
+    let mut screen_on = BRIGHTNESS_LEVELS[brightness_index] != 0;
+
+    display
+        .set_brightness(BRIGHTNESS_LEVELS[brightness_index])
+        .await
+        .ok();
 
     // First screen.
     let mut index = 0usize;
@@ -140,15 +152,23 @@ async fn main(spawner: Spawner) -> ! {
                 {
                     info!("PWR button event: {:?}", event);
                     if event == PowerKeyEvent::ShortPress {
-                        screen_on = !screen_on;
+                        let previous_screen_on = screen_on;
+                        brightness_index = (brightness_index + 1) % BRIGHTNESS_LEVELS.len();
+                        let brightness_value = BRIGHTNESS_LEVELS[brightness_index];
+                        display.set_brightness(brightness_value).await.ok();
+                        screen_on = brightness_value != 0;
                         if screen_on {
-                            info!("Screen on");
-                            display.set_brightness(0xFF).await.ok();
-                            ui::draw(&mut framebuffer, READINGS[index]);
-                            display::flush(&mut display, &framebuffer).await.ok();
+                            info!(
+                                "Brightness step {} -> {}%",
+                                brightness_index,
+                                brightness_percent(brightness_value)
+                            );
+                            if !previous_screen_on {
+                                ui::draw(&mut framebuffer, READINGS[index]);
+                                display::flush(&mut display, &framebuffer).await.ok();
+                            }
                         } else {
-                            info!("Screen off");
-                            display.set_brightness(0x00).await.ok();
+                            info!("Screen off (brightness 0)");
                         }
                     }
                 }
